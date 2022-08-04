@@ -54,4 +54,20 @@ class GreedyStrategy():
             q_values = model(state, drop=False).cpu().detach().data.numpy().squeeze()
             return np.argmax(q_values)
 
+class eGreedyStrategy():
+    temp = 0
+    def __init__(self, epsilon, select_random_action):
+        self.exploratory_action_taken = False
+        self.epsilon = epsilon
+        self.select_random_action = select_random_action
+
+    def select_action(self, model, state):
+        r = np.random.random()
+        if r>self.epsilon:
+            with torch.no_grad():
+                q_values = model(state, drop=False).cpu().detach().data.numpy().squeeze()
+                return np.argmax(q_values)
+        else:
+            return self.select_random_action(state)
+
 
