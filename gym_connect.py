@@ -2,7 +2,7 @@ import numpy as np
 
 
 class gym_connect():
-#    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
+    #    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
     def __init__(self, config):
         self.rows = config['rows']
@@ -18,6 +18,7 @@ class gym_connect():
         self.board= np.zeros((2,self.rows,self.columns),dtype = np.int8)         
         self.rowpercolumn = np.zeros(self.columns,dtype = np.int8)
         self.turn = 0
+        self.observation_space = (2,self.rows,self.columns)
 
 
         """
@@ -44,9 +45,9 @@ class gym_connect():
         self.turn = np.random.randint(0,2)
         info = ''
         if self.turn == 1:
-            reward, done, info = self.playerstep(1,self.opponentplay())
-        return (observation, info) if return_info else observation
-    
+            _, reward, done, info = self.playerstep(1,self.randomplay(self.board))
+        return (observation, info) if return_info else observation.copy()
+
     def checkalign(self, board, row, column, n):
         directions = [(0,1),(1,0),(1,1),(1,-1)]
         for direction in directions:
@@ -76,44 +77,46 @@ class gym_connect():
     def opponentplay(self):
         board = self.board[[1,0]]
         return self.agent(board)
-                    
+
     def randomplay(self, board):
         i=0
         freecolumns = []
         for i in range(self.columns):
             if board[0,0,i]+board[1,0,i]==0:
                 freecolumns.append(i)
+        if len(freecolumns)==0:
+            return 0
         return freecolumns[np.random.randint(0,len(freecolumns))]
 
-                
+
     def playerstep(self, pid, action):
         info = ""
         if self.rowpercolumn[action] == self.rows:
             info = "Wrong move"
             reward = -2
             done = True
-            return reward, done, info
+            return self.board, reward, done, info
         else:
             self.board[pid,-self.rowpercolumn[action]-1,action] = 1
             win = self.checkalign(self.board[pid],self.rows-self.rowpercolumn[action]-1,action, self.inarow)
             full = np.sum(self.board)==self.rows*self.columns
             self.rowpercolumn[action] += 1
             if win:
-                return 1,True,''
+                return self.board, 1,True,''
             elif full:
-                return 0,True,'full'
+                return self.board, 0,True,'full'
             else:
-                return 0,False,''
+                return self.board, 0,False,''
 
 
 
-    def step(self, action, agent=None):
-        reward, done, info = self.playerstep(0,action)
+    def step(self, action):
+        _, reward, done, info = self.playerstep(0,action)
         if done : 
             return self.board.copy(), reward, done, info
 
         action = self.opponentplay()
-        reward1, done, info1 = self.playerstep(1,action)
+        _, reward1, done, info1 = self.playerstep(1,action)
         if reward1 == 1:
             reward = -1
         return  self.board.copy(), reward, done, info+info1

@@ -31,6 +31,38 @@ class ReplayBuffer():
         self.size += 1
         self.size = min(self.size, self.max_size)
 
+    def bstore(self, samples):
+        s, a, r, p, d = samples
+        n = len(a)
+        if n<=self.max_size-self._idx:
+            self.ss_mem[self._idx:self._idx+n] = s
+            self.as_mem[self._idx:self._idx+n,] = a
+            self.rs_mem[self._idx:self._idx+n,] = r
+            self.ps_mem[self._idx:self._idx+n] = p
+            self.ds_mem[self._idx:self._idx+n,] = d
+        else : 
+            ni = self.max_size-self._idx
+            self.ss_mem[self._idx:] = s[:ni]
+            self.as_mem[self._idx:,] = a[:ni]
+            self.rs_mem[self._idx:,] = r[:ni]
+            self.ps_mem[self._idx:] = p[:ni]
+            self.ds_mem[self._idx:,] = d[:ni]
+            self._idx = 0
+            n -= ni
+            self.ss_mem[self._idx:self._idx+n] = s[ni:]
+            self.as_mem[self._idx:self._idx+n,] = a[ni:]
+            self.rs_mem[self._idx:self._idx+n,] = r[ni:]
+            self.ps_mem[self._idx:self._idx+n] = p[ni:]
+            self.ds_mem[self._idx:self._idx+n,] = d[ni:]
+
+
+
+        self._idx += n
+        self._idx = self._idx % self.max_size
+        self.size += n
+        self.size = min(self.size, self.max_size)
+
+
     def sample(self, batch_size=None):
         if batch_size == None:
             batch_size = self.batch_size

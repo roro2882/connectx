@@ -61,13 +61,22 @@ class eGreedyStrategy():
         self.epsilon = epsilon
         self.select_random_action = select_random_action
 
-    def select_action(self, model, state):
-        r = np.random.random()
-        if r>self.epsilon:
-            with torch.no_grad():
-                q_values = model(state, drop=False).cpu().detach().data.numpy().squeeze()
-                return np.argmax(q_values)
+    def select_action(self, model, state, batch=False):
+        if not batch:
+            r = np.random.random()
+            if r>self.epsilon:
+                with torch.no_grad():
+                    q_values = model(state, drop=False).cpu().detach().data.numpy().squeeze()
+                    return np.argmax(q_values)
+            else:
+                return self.select_random_action(state)
         else:
-            return self.select_random_action(state)
-
+            r = np.random.random()
+            if r>self.epsilon:
+                with torch.no_grad():
+                    q_values = model(state, drop=False).cpu().detach().data.numpy().squeeze()
+                    return np.argmax(q_values, axis=1,keepdims=True)
+            else:
+                ractions = [self.select_random_action(state[i]) for i in range(state.shape[0])]
+                return np.array(ractions).reshape(-1,1)
 

@@ -11,6 +11,7 @@ import numpy as np
 from itertools import count
 from strategies import GreedyStrategy, SoftMaxStrategy, eGreedyStrategy
 from replayBuffers import ReplayBuffer
+from batch_env import batchEnv 
 
 
 import os.path
@@ -24,11 +25,10 @@ from torch.utils.tensorboard.writer import SummaryWriter
 torch.backends.cudnn.benchmark = True
 
 LEAVE_PRINT_EVERY_N_SECS = 2
-SAVE_EVERY_N_EPISODES = 5000
-EVAL_EVERY_N_EPISODES = 100
-DEBUG_EVERY_N_EPISODES = 100
-DEMO_EVERY_N_EPISODES = 200
-DEMOR_EVERY_N_EPISODES = 1000
+SAVE_EVERY_N_STEPS = 50000
+EVAL_EVERY_N_STEPS = 1000
+DEBUG_EVERY_N_STEPS = 1000
+DEMO_EVERY_N_STEPS = 2000
 ERASE_LINE = '\x1b[2K'
 EPS = 1e-6
 BEEP = lambda: os.system("printf '\a'")
@@ -50,10 +50,10 @@ class FCQ(nn.Module):
         super(FCQ, self).__init__()
         self.activation_fc = activation_fc
         self.input_dim = input_dim
-        out_channels = 63
+        out_channels = 64
 
         self.input_layer = nn.Conv2d(input_dim[0], out_channels = out_channels, kernel_size=3, padding=1, padding_mode='zeros', stride=1)
-#        self.input_layer1 = nn.Conv2d(out_channels, out_channels = out_channels, kernel_size=3, padding=1, stride=1)
+        self.input_layer1 = nn.Conv2d(out_channels, out_channels = out_channels, kernel_size=3, padding=1, stride=1)
         self.pool_layer    = nn.MaxPool2d(5)
         self.dropout = nn.Dropout2d(0.5)
         #self.input_layer2 = nn.Conv2d(out_channels, out_channels = out_channels, kernel_size=3, padding=1, stride=1)
@@ -159,12 +159,11 @@ class DDQN():
         self.n_warmup_batches = n_warmup_batches
         self.train_every_n_steps = train_every_n_steps
         self.update_target_every_steps = update_target_every_steps
+        self.total_step = 0
         self.target_model = self.value_model_fn()
         self.target_model1 = self.value_model_fn()
         self.online_model = self.value_model_fn()
         self.online_model1 = self.value_model_fn()
-        self.total_ep = 0
-        self.total_step = 0
         self.update_network()
 
     def optimize_model(self, experiences):
@@ -185,6 +184,7 @@ class DDQN():
             self.value_errors.append(value_loss.item())
             value_loss.backward()
             self.value_optimizer.step()
+            self.scheduer.step()
             self.value_optimizer.zero_grad()
         else:
             states, actions, rewards, next_states, is_terminals = experiences
@@ -202,19 +202,14 @@ class DDQN():
             self.value_errors.append(value_loss.item())
             value_loss.backward()
             self.value_optimizer1.step()
+            self.scheduer.step()
             self.value_optimizer1.zero_grad()
 
-        self.scheduer.step()
-        self.scheduer1.step()
-        self.total_ep+=1
 
-
-    def interaction_step(self, state, env):
-        action = self.training_strategy.select_action(self.online_model, state)
-        new_state, reward, is_terminal, info = env.step(action)
-        is_truncated = 'TimeLimit.truncated' in info and info['TimeLimit.truncated']
-        is_failure = is_terminal and not is_truncated
-        experience = (state, action, reward, new_state, float(is_failure))
+    def interaction_step(self, states, batch_env):
+        action = self.training_strategy.select_actions(self.online_model, states)
+        new_states, rewards, terminals, infos = batch_env.step(action)
+        experiences = (state, action, reward, new_state, float(is_failure))
 
         self.replay_buffer.store(experience)
         self.episode_reward[-1] += reward
@@ -227,7 +222,7 @@ class DDQN():
                                   self.online_model.parameters()):
             target.data.copy_(online.data)
 
-    def train(self, make_env_fn, make_env_kargs, make_eval_env_kargs, seed, gamma, 
+    def train(self, batch_env, eval_env, seed, gamma, 
               max_minutes, max_steps, goal_mean_100_reward):
         training_start, last_debug_time = time.time(), float('-inf')
         self.checkpoint_dir = "./checkpoints"
@@ -236,8 +231,6 @@ class DDQN():
         self.seed = seed
         self.gamma = gamma
         
-        env = self.make_env_fn(**self.make_env_kargs, seed=self.seed)
-        eval_env = self.make_env_fn(**make_eval_env_kargs, seed = self.seed)
         torch.manual_seed(self.seed) ; np.random.seed(self.seed) ; random.seed(self.seed)
     
         self.episode_timestep = []
@@ -250,7 +243,6 @@ class DDQN():
         self.n_q_dist = []
         self.value_errors = []
         self.ev_value_errors = []
-        self.nev_value_errors = []
         
 
         self.value_optimizer = self.value_optimizer_fn(self.online_model, 
@@ -259,80 +251,50 @@ class DDQN():
         self.value_optimizer1 = self.value_optimizer_fn(self.online_model1, 
                                                        self.value_optimizer_lr)
 
-        self.training_strategy = training_strategy_fn()
+        self.training_strategy = self.training_strategy_fn()
         self.training_strategy.t = self.total_step
-        self.evaluation_strategy = evaluation_strategy_fn() 
-        self.scheduer = self.value_scheduler_fn(self.value_optimizer, last_ep=self.total_ep-1)
-        self.scheduer1 = self.value_scheduler_fn(self.value_optimizer1, last_ep=self.total_ep-1)
+        self.evaluation_strategy = self.evaluation_strategy_fn() 
+        self.scheduer = self.value_scheduler_fn(self.value_optimizer)
                     
         result = np.empty((max_steps, 5))
         result[:] = np.nan
         training_time = 0
-        for episode in range(1, max_steps + 1):
-            episode_start = time.time()
             
-            state, is_terminal = env.reset(), False
-            self.episode_reward.append(0.0)
-            self.episode_timestep.append(0.0)
-            self.episode_exploration.append(0.0)
+        states = batch_env.reset()
 
-            min_samples = self.replay_buffer.batch_size * self.n_warmup_batches
-            for step in count():
-                state, is_terminal = self.interaction_step(state, env)
-                self.total_step += 1
-                               
-                if self.total_step % self.update_target_every_steps == 0:
-                    self.update_network()
+        min_samples = self.replay_buffer.batch_size * self.n_warmup_batches
+        for step in count():
+            states, terminals = self.interaction_step(states, batch_env)
+            self.total_step += 1
+                           
+            if self.total_step % self.update_target_every_steps == 0:
+                self.update_network()
 
-                if len(self.replay_buffer) > min_samples:
-                    if self.total_step%self.train_every_n_steps==0:
-                        experiences = self.replay_buffer.sample()
-                        experiences = self.online_model.load(experiences)
-                        self.optimize_model(experiences)
- 
+            if len(self.replay_buffer) > min_samples:
+                if self.total_step%self.train_every_n_steps==0:
+                    experiences = self.replay_buffer.sample()
+                    experiences = self.online_model.load(experiences)
+                    self.optimize_model(experiences)
 
-                if is_terminal:
-                    #gc.collect()
-                    break
 
-                            # stats
-            episode_elapsed = time.time() - episode_start
-            
-            self.episode_seconds.append(episode_elapsed)
-            training_time += episode_elapsed
 
-            if episode%EVAL_EVERY_N_EPISODES==0:
+            if step%EVAL_EVERY_N_STEPS==0:
                 evaluation_score, _ = self.evaluate(self.online_model, eval_env)
-                _, _ = self.evaluate(self.online_model, env, is_eval_env = False)
                 self.evaluation_scores.append(evaluation_score)
-            if episode%SAVE_EVERY_N_EPISODES==0:
+            if step%SAVE_EVERY_N_STEPS==0:
                 self.save_checkpoint()
-            if episode%DEMO_EVERY_N_EPISODES==0:
-                self.demo(5,env,self.online_model, self.training_strategy)
-                
-            if episode%DEMOR_EVERY_N_EPISODES==0:
-                print('rand demo')
-                self.demo(20,eval_env,self.online_model, self.evaluation_strategy)
-                
-            if episode%DEBUG_EVERY_N_EPISODES==0:
-                mean_100_reward = np.mean(self.episode_reward[-1000:])
-                std_100_reward = np.std(self.episode_reward[-1000:])
+            if step%DEMO_EVERY_N_STEPS==0:
+                self.demo(5,eval_env,self.online_model, self.training_strategy)
+            if step%DEBUG_EVERY_N_STEPS==0:
                 mean_100_q_value = np.mean(self.q_value[-100:])
                 mean_100_q_dist = np.mean(self.q_dist[-100:])
                 mean_100_nq_dist = np.mean(self.n_q_dist[-1000:])
                 mean_100_value_loss = np.mean(self.value_errors[-400:])
                 mean_100_ev_value_loss = np.mean(self.ev_value_errors[-1000:])
-                mean_100_nev_value_loss = np.mean(self.nev_value_errors[-1000:])
                 mean_100_eval_score = np.mean(self.evaluation_scores[-400:])
                 std_100_eval_score = np.std(self.evaluation_scores[-100:])
-                lst_100_exp_rat = np.array(
-                    self.episode_exploration[-100:])/np.array(self.episode_timestep[-100:])
-                mean_100_exp_rat = np.mean(lst_100_exp_rat)
-                std_100_exp_rat = np.std(lst_100_exp_rat)
                 
                 wallclock_elapsed = time.time() - training_start
-                result[episode-1] = self.total_step, mean_100_reward, \
-                    mean_100_eval_score, training_time, wallclock_elapsed
                 
                 reached_debug_time = time.time() - last_debug_time >= LEAVE_PRINT_EVERY_N_SECS
                 reached_max_minutes = wallclock_elapsed >= max_minutes * 60
@@ -343,29 +305,24 @@ class DDQN():
                                    reached_goal_mean_reward
 
                 elapsed_str = time.strftime("%H:%M:%S", time.gmtime(time.time() - training_start))
-                debug_message = 'el {}, ep {:04}, ts {:06}, '
+                debug_message = 'el {}, ts {:06}, '
                 #debug_message += 'ar 10 {:05.1f}\u00B1{:05.1f}, '
-                debug_message += '100 {:05.2f}\u00B1{:05.1f}, '
                 debug_message += 'ev {:05.2f}\u00B1{:05.1f}'
                 debug_message += ',   vl {:05.3f}'
                 debug_message = debug_message.format(
-                    elapsed_str, episode-1, self.total_step, #mean_10_reward, std_10_reward, 
-                    mean_100_reward, std_100_reward,
+                    elapsed_str, self.total_step, #mean_10_reward, std_10_reward, 
                     mean_100_eval_score, std_100_eval_score,
                     mean_100_value_loss)
                 print(debug_message, end='\r', flush=True)
                 writer.add_scalar("value loss", mean_100_value_loss, self.total_step)
                 writer.add_scalar("ev value loss", mean_100_ev_value_loss, self.total_step)
-                writer.add_scalar("nev value loss", mean_100_nev_value_loss, self.total_step)
                 writer.add_scalar("time", int(time.time() - training_start), self.total_step)
-                writer.add_scalar("reward", mean_100_reward, self.total_step)
                 writer.add_scalar("scheduer", float(self.scheduer.get_last_lr()[0]), self.total_step)
                 writer.add_scalar("evaluation score", mean_100_eval_score, self.total_step)
                 writer.add_scalar("q_value", mean_100_q_value, self.total_step)
                 writer.add_scalar("q_dist", mean_100_q_dist, self.total_step)
                 writer.add_scalar("nq_dist", mean_100_nq_dist, self.total_step)
                 writer.add_scalar("temp", self.training_strategy.temp, self.total_step)
-                writer.add_scalar("total_ep", self.total_ep, self.total_step)
                 if reached_debug_time or training_is_over:
                     print(ERASE_LINE + debug_message, flush=True)
                     last_debug_time = time.time()
@@ -374,23 +331,19 @@ class DDQN():
                     if reached_max_steps: print(u'--> reached_max_steps \u2715')
                     if reached_goal_mean_reward: print(u'--> reached_goal_mean_reward \u2713')
                     break
-                
-        final_eval_score, score_std = self.evaluate(self.online_model, eval_env, n_episodes=5000)
+            
+        final_eval_score, score_std = self.evaluate(self.online_model, eval_env, n_episodes=1000)
         wallclock_time = time.time() - training_start
         print('Training complete.')
         print('Final evaluation score {:.2f}\u00B1{:.2f} in {:.2f}s training time,'
               ' {:.2f}s wall-clock time.\n'.format(
                   final_eval_score, score_std, training_time, wallclock_time))
-        self.demo(20,env,self.online_model, self.evaluation_strategy)
+        self.demo(20,eval_env,self.online_model, self.evaluation_strategy)
         del env
-        return result, final_eval_score, mean_100_value_loss, training_time, wallclock_time
+        return final_eval_score, mean_100_value_loss, training_time, wallclock_time
     
     def agent(self, state):
-        r = np.random.random()
-        if r>0.5:
-            return self.training_strategy.select_action(self.online_model,state)
-        else:
-            return self.training_strategy.select_action(self.online_model1,state)
+        return self.training_strategy.select_action(self.target_model,state)
 
     def demo(self, n_demo,env, model, strategy):
         for episode in range(1, n_demo+ 1):
@@ -418,7 +371,7 @@ class DDQN():
                     print('--------------------------')
                     break
          
-    def evaluate(self, eval_policy_model, eval_env, is_eval_env=True, n_episodes=10):
+    def evaluate(self, eval_policy_model, eval_env, n_episodes=10):
         rs = []
         for _ in range(n_episodes):
             s, d = eval_env.reset(), False
@@ -429,10 +382,7 @@ class DDQN():
             next_states = []
             is_terminals = []
             for _ in count():
-                if is_eval_env:
-                    a = self.evaluation_strategy.select_action(eval_policy_model, s)
-                else :
-                    a = self.training_strategy.select_action(eval_policy_model,s)
+                a = self.evaluation_strategy.select_action(eval_policy_model, s)
                 states.append(s)
                 actions.append(a)
                 s, r, d, _ = eval_env.step(a)
@@ -445,19 +395,16 @@ class DDQN():
             with torch.no_grad():
                 experiences = np.array(states), np.array(actions).reshape((-1,1)), np.array(rewards).reshape((-1,1)) , np.array(next_states), np.array(is_terminals).reshape((-1,1))
                 states, actions, rewards, next_states, is_terminals = self.online_model.load(experiences)
-                nactions = self.online_model(next_states).max(1)[1].unsqueeze(1)
-                max_a_q_sp = self.online_model1(next_states).detach().gather(1,nactions)
+                nactions = self.online_model1(next_states).max(1)[1].unsqueeze(1)
+                max_a_q_sp = self.online_model(next_states).detach().gather(1,nactions)
                 target_q_sa = rewards + (self.gamma * max_a_q_sp * (1 - is_terminals))
-                q_values = self.online_model1(states)
+                q_values = self.online_model(states)
                 self.n_q_dist.append(np.std(q_values.cpu().detach().data.numpy()))
                 q_sa = q_values.gather(1, actions)
                 
                 td_error = q_sa - target_q_sa
                 value_loss = td_error.pow(2).mul(0.5).mean()
-                if is_eval_env:
-                    self.ev_value_errors.append(value_loss.item())
-                else:
-                    self.nev_value_errors.append(value_loss.item())
+                self.ev_value_errors.append(value_loss.item())
 
         return np.mean(rs), np.std(rs)
 
@@ -489,7 +436,6 @@ class DDQN():
         self.online_model1.load_state_dict(dictionarysave['state_dict_1'])
         self.update_network()
         self.total_step = dictionarysave['total_step']
-        self.total_ep = dictionarysave['total_ep']
         self.evaluation_scores= dictionarysave['evaluation_scores']
         self.episode_reward = dictionarysave['episode_reward']
 
@@ -498,7 +444,6 @@ class DDQN():
                 'state_dict':self.online_model.state_dict(),
                 'state_dict_1':self.online_model1.state_dict(),
                 'total_step':self.total_step,
-                'total_ep':self.total_ep,
                 'evaluation_scores':self.evaluation_scores,
                 'episode_reward':self.episode_reward,
                 }
@@ -517,37 +462,32 @@ class DDQN():
 
 
 environment_settings = {
-    'gamma': 0.9,
-    'lr':5e-4,
+    'gamma': 0,
+    'lr':0.00001,
     'batch_size':128,
     'replay_buffer_size':200000,
     'update_target_every_n_steps':200000,
-    'lr_scheduler_min':1e-4,
-    'lr_scheduler_epochs':50000,
+    'lr_scheduler_gamma':1.0,
     'goal_mean_100_reward': 1.1,
-    'n_warmup_batches':100,
-    'train_every_n_steps':4,
-    'epsilon':0.2,
+    'n_warmup_batches':500,
+    'train_every_n_steps':16,
     'max_minutes': 180,
-    'max_steps':1000000,
-    'name':'smallddqnc%t',
+    'max_steps':10000000,
+    'name':'ddqnc%t',
 }
-environment_settings['name'] = 'smallddqn'+str(environment_settings['gamma'])+'_%t'
+environment_settings['name'] = 'ddqn'+str(environment_settings['train_every_n_steps'])+'_%t'
 #environment_settings['name'] = 'pourgen'
 
-rows, columns, inarow = 4,4,3
+rows, columns, inarow = 5,5,4
 seed = np.random.randint(10,100)
 nS = [2,rows,columns]
 nA = columns
 
 
-value_model_fn = lambda :FCQ(nS, nA, hidden_dims=(0,127,63), activation_fc=F.relu)
+value_model_fn = lambda :FCQ(nS, nA, hidden_dims=(0,128,128), activation_fc=F.relu)
 value_optimizer_fn = lambda net, lr: optim.Adam(net.parameters(), lr=lr)
 value_optimizer_lr = environment_settings['lr']
-sch_gamma = np.exp(-1/environment_settings['lr_scheduler_epochs'])
-#sch = lambda epoch:  (environment_settings['lr_scheduler_min'])
-sch = lambda epoch: sch_gamma**epoch*(1-environment_settings['lr_scheduler_min']/environment_settings['lr']) + environment_settings['lr_scheduler_min']/environment_settings['lr']
-value_scheduler_fn = lambda value_optimizer, last_ep=-1 : torch.optim.lr_scheduler.LambdaLR(value_optimizer, sch,last_epoch=last_ep)
+value_scheduler_fn = lambda value_optimizer : torch.optim.lr_scheduler.ExponentialLR(value_optimizer, environment_settings['lr_scheduler_gamma'])
 
 #training_strategy_fn = lambda: SoftMaxStrategy(init_temp=1.0, 
 #                                                min_temp=0.1, 
@@ -555,7 +495,7 @@ value_scheduler_fn = lambda value_optimizer, last_ep=-1 : torch.optim.lr_schedul
 #                                                max_steps=environment_settings['max_steps'])
 dummy_env = gym_connect.gym_connect(config={'agent': None, 'rows':rows, 'columns':columns, 'inarow':inarow})
 
-training_strategy_fn = lambda: eGreedyStrategy(environment_settings['epsilon'], dummy_env.randomplay)
+training_strategy_fn = lambda: eGreedyStrategy(0.8, dummy_env.randomplay)
 
 evaluation_strategy_fn = lambda: GreedyStrategy()
 
@@ -584,17 +524,16 @@ if opponentpath != '':
     agent_eval = Agent(value_model_fn, opponentpath ).play 
 
 if generation:
-    SAVE_EVERY_N_EPISODES = 999999999
+    SAVE_EVERY_N_STEPS = 999999999
     n_warmup_batches = 100000000
     environment_settings['replay_buffer_size'] = environment_settings['max_steps']
     environment_settings['name'] = 'generation'
 
     dummy_env = gym_connect.gym_connect(config={'agent': None, 'rows':rows, 'columns':columns, 'inarow':inarow})
     training_strategy_fn = lambda: eGreedyStrategy(1, dummy_env.randomplay)
-    SAVE_EVERY_N_EPISODES = 5000
-    EVAL_EVERY_N_EPISODES = 100000000
-    DEBUG_EVERY_N_EPISODES = 100
-    DEMO_EVERY_N_EPISODES = 2000
+    EVAL_EVERY_N_STEPS = 100000000
+    DEBUG_EVERY_N_STEPS = 1000
+    DEMO_EVERY_N_STEPS = 20000
 
 
 environment_settings['name'] =  environment_settings['name'].replace('%t',str(int(time.time())))
@@ -613,8 +552,6 @@ agent = DDQN(replay_buffer,
             environment_settings['update_target_every_n_steps'])
 
 
-writer.add_text('network',str(agent.online_model))
-writer.add_text('params',str(environment_settings))
 if path != "":
     agent.retrieve_checkpoint(path)
     if generation:
@@ -633,5 +570,6 @@ if savingpath != '':
     agent.save_games(savingpath)
 print(metrics)
 hparams = environment_settings
+writer.add_text('network',str(agent.online_model))
 writer.add_hparams(environment_settings,metrics)
 _ = BEEP()
