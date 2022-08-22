@@ -6,7 +6,7 @@ class batchEnv():
     def __init__(self, make_env_fn, num = 16, batch_agent = None):
         for i in range(num):
             self.envs.append(make_env_fn())
-        self.states = np.zeros((num,)+self.envs[0].observation_space,dtype = np.uint8)
+        self.states = np.zeros((num,)+self.envs[0].observation_space,dtype = np.short)
         self.rewards= np.zeros((num,1),dtype = np.float32)
         self.dones= np.zeros((num,1),dtype = np.bool8)
         self.infos= np.zeros((num,1),dtype = np.str0)
@@ -28,12 +28,13 @@ class batchEnv():
 
     def step(self, actions):
         if self.batch_agent is not None:
+            #pstates = self.states.copy()
             for i in range(len(self.envs)):
                 self.states[i], self.rewards[i,0], self.dones[i,0], self.infos[i,0] = self.envs[i].playerstep(0, actions[i,0])
                
-            oactions = self.batch_agent(self.states)
+            oactions = self.batch_agent(self.states[:,::-1,:,:].copy())
             for i in range(len(self.envs)):
-                if self.dones[i]:
+                if self.dones[i,0]:
                     self.states[i] = self.envs[i].reset()
                     continue
                 self.states[i], oreward, odone, oinfos = self.envs[i].playerstep(1,oactions[i,0])
@@ -45,8 +46,9 @@ class batchEnv():
                     self.states[i] = self.envs[i].reset()
         else : 
             for i in range(len(self.envs)):
-                self.states[i], self.rewards[i], self.dones[i], self.infos[i] = self.envs[i].step(actions[i])
-
-        return self.states, self.rewards, self.dones, self.infos
+                self.states[i], self.rewards[i,0], self.dones[i,0], self.infos[i,0] = self.envs[i].step(actions[i,0])
+                if self.dones[i,0]:
+                    self.states[i] = self.envs[i].reset()
+        return self.states.copy(), self.rewards.copy(), self.dones.copy(), self.infos.copy()
 
 

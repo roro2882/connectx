@@ -1,0 +1,1 @@
+{'gamma': 0.9, 'lr': 0.0001, 'batch_size': 128, 'replay_buffer_size': 200000, 'update_target_every_n_steps': 200000, 'lr_scheduler_min': 5e-06, 'lr_scheduler_epochs': 50000, 'goal_mean_100_reward': 1.1, 'n_warmup_batches': 100, 'train_every_n_steps': -2, 'temp': 0.2, 'max_minutes': 1800, 'max_steps': 10000000, 'env_batch_size': 64, 'name': '67soft0.2'}

@@ -4,10 +4,10 @@ class ReplayBuffer():
                  state_size,
                  max_size=10000, 
                  batch_size=64):
-        self.ss_mem = np.empty(shape=(max_size,)+tuple(state_size), dtype=np.int8)
+        self.ss_mem = np.empty(shape=(max_size,)+tuple(state_size), dtype=np.short)
         self.as_mem = np.empty(shape=(max_size,1), dtype=np.int8)
         self.rs_mem = np.empty(shape=(max_size,1), dtype=np.float32)
-        self.ps_mem = np.empty(shape=(max_size,)+tuple(state_size), dtype = np.int8)
+        self.ps_mem = np.empty(shape=(max_size,)+tuple(state_size), dtype = np.short)
         self.ds_mem = np.empty(shape=(max_size,1), dtype=np.bool8)
 
         self.max_size = max_size

@@ -1,4 +1,5 @@
 import numpy as np
+import utils
 import torch
 
 class SoftMaxStrategy():
@@ -20,39 +21,68 @@ class SoftMaxStrategy():
         temp = np.clip(temp, self.min_temp, self.init_temp)
         self.t += 1
         self.temp = temp
-    def choice(self,probs):
-        x = np.random.rand()
-        cum = 0
-        i=0
-        for i,p in enumerate(probs):
-            cum += p
-            if x < cum:
-                break
-        return i
-    def select_action(self, model, state):
-        self.exploratory_action_taken = False
-        
-        self._update_temp()
-        with torch.no_grad():
-            q_values = model(state).cpu().detach().data.numpy().squeeze()
-            scaled_qs = q_values/self.temp
-            norm_qs = scaled_qs - scaled_qs.max()            
-            e = np.exp(norm_qs)
-            probs = e / np.sum(e)
 
-        action = self.choice(probs)
-        self.exploratory_action_taken = action != np.argmax(q_values)
-        return action
+    def choice(self,probs, batch=False):
+        if not batch:
+            x = np.random.rand()
+            cum = 0
+            i=0
+            for i,p in enumerate(probs):
+                cum += p
+                if x < cum:
+                    break
+            return i
+        else:
+            pass
+
+    def select_action_from_q_values(self, q_values, batch=False, debug=False):
+        self._update_temp()
+        exp = np.exp(q_values/self.temp).astype(float)
+        probs = exp/np.sum(exp,axis=1,keepdims=True)
+        if debug:
+            print(probs)
+        actions = utils.chooseActions(probs)
+        if batch:
+            return actions
+        else:
+            return actions[0]
+
+
+    def select_action(self, model, state, batch=False, debug=False):
+        if not batch:
+            if debug:
+                print(state[0]*1+state[1]*2)
+            with torch.no_grad():
+                q_values = model(state, drop=False).cpu().detach().data.numpy()
+                if debug:
+                    print(q_values)
+
+                actions = self.select_action_from_q_values(q_values, debug=debug)
+                if debug:
+                    print("Action : ",actions[0])
+                return actions
+        else:
+            with torch.no_grad():
+                q_values = model(state, drop=False).cpu().detach().data.numpy()
+                actions = self.select_action_from_q_values(q_values, batch=True)
+                return actions
 
 
 class GreedyStrategy():
     def __init__(self):
         self.exploratory_action_taken = False
 
-    def select_action(self, model, state):
+    def select_action(self, model, state, debug=False):
+        if debug:
+            print(state[0]*1+state[1]*2)
         with torch.no_grad():
             q_values = model(state, drop=False).cpu().detach().data.numpy().squeeze()
-            return np.argmax(q_values)
+            if debug:
+                print(q_values)
+            action = np.argmax(q_values)
+            if debug:
+                print("Action : ",action)
+            return action
 
 class eGreedyStrategy():
     temp = 0
@@ -61,13 +91,20 @@ class eGreedyStrategy():
         self.epsilon = epsilon
         self.select_random_action = select_random_action
 
-    def select_action(self, model, state, batch=False):
+    def select_action(self, model, state, batch=False, debug=False):
         if not batch:
+            if debug:
+                print(state[0]*1+state[1]*2)
             r = np.random.random()
             if r>self.epsilon:
                 with torch.no_grad():
                     q_values = model(state, drop=False).cpu().detach().data.numpy().squeeze()
-                    return np.argmax(q_values)
+                    if debug:
+                        print(q_values)
+                    action = np.argmax(q_values)
+                    if debug:
+                        print("Action : ",action)
+                    return action
             else:
                 return self.select_random_action(state)
         else:
